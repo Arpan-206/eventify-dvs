@@ -26,23 +26,24 @@ def test_identical_frames_produce_no_events():
     assert len(events) == 0
 
 
-def test_brightening_pixel_yields_polarity_1():
-    prev = _uniform((4, 4), 50.0)
+def test_brightening_pixel_barely_crossing_yields_one_event():
+    # log(120/100) ≈ 0.182 → at c_thresh=0.15, exactly 1 crossing.
+    prev = _uniform((4, 4), 99.0)  # +eps=1 → 100 in log
     curr = prev.copy()
-    curr[1, 2] = 250.0
-    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000)
+    curr[1, 2] = 119.0  # +eps=1 → 120
+    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
 
     assert len(events) == 1
     e = events[0]
-    assert (e["x"], e["y"]) == (2, 1)  # (x=col, y=row)
+    assert (e["x"], e["y"]) == (2, 1)
     assert e["p"] == 1
 
 
-def test_darkening_pixel_yields_polarity_0():
-    prev = _uniform((4, 4), 250.0)
+def test_darkening_pixel_barely_crossing_yields_one_event():
+    prev = _uniform((4, 4), 119.0)
     curr = prev.copy()
-    curr[3, 0] = 20.0
-    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000)
+    curr[3, 0] = 99.0
+    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
 
     assert len(events) == 1
     e = events[0]
@@ -102,10 +103,10 @@ def test_sensor_size_resizes_before_event_gen():
     events = frame_to_event_tuples(
         prev, curr, prev_t_us=0, curr_t_us=1000, sensor_size=(32, 32)  # (w, h)
     )
-    # After resize to 32x32, at most 32*32 events.
+    # After resize to 32x32; with multi-crossing, we can get up to (32*32)*K events
+    # where K is the per-pixel crossing count. Just check coord bounds hold.
     assert np.all(events["x"] < 32)
     assert np.all(events["y"] < 32)
-    assert len(events) <= 32 * 32
 
 
 def test_shape_mismatch_raises():
@@ -123,3 +124,72 @@ def test_negative_interval_raises():
     curr = _uniform((4, 4), 200.0)
     with pytest.raises(ValueError):
         frame_to_event_tuples(prev, curr, prev_t_us=1000, curr_t_us=500)
+
+
+# ---- multi-crossing tests -------------------------------------------------
+
+
+def test_multi_crossing_emits_multiple_events_per_pixel():
+    """A pixel whose log-delta spans K thresholds should emit K events."""
+    # log(200/50) ≈ 1.386. At c_thresh=0.15, floor(1.386/0.15) = 9 crossings.
+    prev = _uniform((3, 3), 49.0)  # +eps=1 → 50
+    curr = prev.copy()
+    curr[1, 1] = 199.0  # +eps=1 → 200
+    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+
+    # Exactly one pixel fired, but many crossings.
+    assert len(events) == 9
+    # All events for that single pixel share coordinates and polarity.
+    assert np.all(events["x"] == 1)
+    assert np.all(events["y"] == 1)
+    assert np.all(events["p"] == 1)
+
+
+def test_multi_crossing_timestamps_are_distinct_and_ordered():
+    prev = _uniform((1, 1), 49.0)
+    curr = _uniform((1, 1), 199.0)
+    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=9000, c_thresh=0.15)
+
+    ts = events["t"]
+    assert len(ts) == 9
+    # Strictly monotonic within a single pixel's event train.
+    assert np.all(np.diff(ts) > 0)
+    # Spread across the interval, not clustered at either end.
+    assert ts.min() >= 0
+    assert ts.max() <= 9000
+
+
+def test_multi_crossing_darkening_emits_multiple_off_events():
+    prev = _uniform((2, 2), 199.0)
+    curr = prev.copy()
+    curr[0, 0] = 49.0
+    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+
+    assert len(events) == 9
+    assert np.all(events["p"] == 0)
+
+
+def test_sub_threshold_change_still_yields_no_events():
+    prev = _uniform((4, 4), 100.0)
+    curr = _uniform((4, 4), 105.0)  # log(106/101) ≈ 0.048, below 0.15
+    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+    assert len(events) == 0
+
+
+def test_default_threshold_is_lower_than_before():
+    """Default c_thresh should be 0.05 for more sensitivity."""
+    import inspect
+
+    sig = inspect.signature(frame_to_event_tuples)
+    assert sig.parameters["c_thresh"].default == 0.05
+
+
+def test_lower_default_produces_more_events_than_old_default():
+    """Same input, default threshold now vs. old 0.15 → strictly more events."""
+    rng = np.random.default_rng(42)
+    prev = rng.uniform(20, 220, size=(32, 32)).astype(np.float32)
+    curr = np.clip(prev + rng.normal(0, 15, size=prev.shape), 1, 255).astype(np.float32)
+
+    events_default = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000)
+    events_old = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+    assert len(events_default) > len(events_old)

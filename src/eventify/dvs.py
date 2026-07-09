@@ -39,20 +39,47 @@ def _maybe_resize(frame: np.ndarray, sensor_size: Optional[Tuple[int, int]]) -> 
     return cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
 
 
+def interpolate_frames(
+    prev_frame: np.ndarray,
+    curr_frame: np.ndarray,
+    n_intermediate: int,
+) -> list:
+    """Linearly interpolate ``n_intermediate`` frames between two endpoints.
+
+    Returns a list of length ``n_intermediate + 2`` starting with ``prev_frame``
+    and ending with ``curr_frame``. A naive stand-in for optical-flow-based
+    interpolation (v2e's SuperSloMo) that keeps the library dependency-free.
+    """
+    if prev_frame.shape != curr_frame.shape:
+        raise ValueError(
+            f"Frame shape mismatch: {prev_frame.shape} vs {curr_frame.shape}"
+        )
+    if n_intermediate < 0:
+        raise ValueError(f"n_intermediate must be >= 0, got {n_intermediate}")
+
+    prev_f = prev_frame.astype(np.float32, copy=False)
+    curr_f = curr_frame.astype(np.float32, copy=False)
+
+    total = n_intermediate + 2
+    alphas = np.linspace(0.0, 1.0, total)
+    return [(1.0 - a) * prev_f + a * curr_f for a in alphas]
+
+
 def frame_to_event_tuples(
     prev_frame: np.ndarray,
     curr_frame: np.ndarray,
     prev_t_us: int,
     curr_t_us: int,
-    c_thresh: float = 0.15,
+    c_thresh: float = 0.05,
     eps: float = 1.0,
     sensor_size: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
-    """Emit binary-polarity DVS event tuples for a single frame pair.
+    """Emit binary-polarity DVS event tuples with multi-crossing.
 
-    Timestamps for the emitted events are uniformly distributed across
-    ``[prev_t_us, curr_t_us]`` in raster order. The dataset ships as
-    binary polarity, so magnitude is intentionally discarded here.
+    A pixel whose log-intensity change spans ``K`` threshold widths emits
+    ``K`` events (matching how a real DVS sensor fires once per crossing).
+    Each pixel's events are staggered uniformly across
+    ``[prev_t_us, curr_t_us]`` so their timestamps are strictly monotonic.
     """
     if prev_frame.shape != curr_frame.shape:
         raise ValueError(
@@ -68,45 +95,67 @@ def frame_to_event_tuples(
 
     delta = np.log(curr + eps) - np.log(prev + eps)
 
-    on_mask = delta > c_thresh
-    off_mask = delta < -c_thresh
-    fired = on_mask | off_mask
+    # How many full c_thresh crossings did each pixel span?
+    crossings = np.floor(np.abs(delta) / c_thresh).astype(np.int32)
+    total_events = int(crossings.sum())
+    if total_events == 0:
+        return np.zeros(0, dtype=EVENT_DTYPE)
 
-    n = int(fired.sum())
-    events = np.zeros(n, dtype=EVENT_DTYPE)
-    if n == 0:
-        return events
+    # Flat arrays of (x, y, polarity) counts, one entry per firing pixel.
+    ys, xs = np.nonzero(crossings)
+    counts = crossings[ys, xs]
+    polarities = (delta[ys, xs] > 0).astype(np.int8)  # 1 = ON, 0 = OFF
 
-    ys, xs = np.nonzero(fired)  # numpy is row-major: (row=y, col=x)
-    events["x"] = xs.astype(np.int16)
-    events["y"] = ys.astype(np.int16)
-    events["p"] = on_mask[ys, xs].astype(np.int8)  # 1 for ON, 0 for OFF
+    # Expand: each pixel contributes `counts[i]` copies of its coords/polarity.
+    events = np.zeros(total_events, dtype=EVENT_DTYPE)
+    events["x"] = np.repeat(xs.astype(np.int16), counts)
+    events["y"] = np.repeat(ys.astype(np.int16), counts)
+    events["p"] = np.repeat(polarities, counts)
 
-    # Uniform spread across the inter-frame interval, in raster order.
+    # Timestamps: for each pixel with K events, stagger them uniformly across
+    # the frame interval. Position k of K → alpha = (k+1)/(K+1) so no event
+    # lands exactly on the boundary, and consecutive events at the same pixel
+    # are strictly ordered.
+    #
+    # Vectorized construction of per-pixel indices [1..K1, 1..K2, ...]:
+    # start_indices marks where each pixel's block begins in the flat array;
+    # a running cumsum minus the offset per block yields 1..K per pixel.
     interval = curr_t_us - prev_t_us
-    if n == 1:
-        events["t"] = prev_t_us + interval // 2
-    else:
-        events["t"] = (prev_t_us + np.linspace(0, interval, n, dtype=np.float64)).astype(np.int64)
+    starts = np.concatenate([[0], np.cumsum(counts[:-1])])
+    within_pixel_idx = (
+        np.arange(total_events) - np.repeat(starts, counts) + 1
+    ).astype(np.float64)
+    within_pixel_denom = np.repeat(counts + 1, counts).astype(np.float64)
+    alphas = within_pixel_idx / within_pixel_denom
+    events["t"] = (prev_t_us + alphas * interval).astype(np.int64)
 
     return events
 
 
 def video_to_event_stream(
     source: Union[str, int],
-    c_thresh: float = 0.15,
+    c_thresh: float = 0.05,
     sensor_size: Optional[Tuple[int, int]] = None,
+    interp: int = 0,
+    capture_settings: Optional[dict] = None,
 ) -> Generator[np.ndarray, None, None]:
     """Yield per-frame-pair structured event arrays from a video or webcam.
 
-    ``source`` is a file path or an integer webcam device index. Events
-    across all chunks form a monotonic microsecond stream. Frames are
-    kept at native resolution unless ``sensor_size=(w, h)`` overrides it.
+    ``source`` is a file path or an integer webcam device index. When
+    ``interp > 0``, that many sub-frames are linearly interpolated between
+    each real frame pair and event generation runs on every sub-interval,
+    yielding one chunk per sub-interval. ``capture_settings`` is an optional
+    dict of OpenCV ``CAP_PROP_*`` overrides (e.g. width/height/fps) applied
+    right after the capture opens.
     """
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         cap.release()
         raise IOError(f"Could not open video source: {source!r}")
+
+    if capture_settings:
+        for prop, value in capture_settings.items():
+            cap.set(prop, value)
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
     frame_period_us = int(1_000_000 / fps) if fps > 0 else 33_333  # ~30 FPS webcam fallback
@@ -117,9 +166,7 @@ def video_to_event_stream(
             return
         prev_t_us = 0
 
-        # Cache grayscale conversion so we don't recompute for the next iteration.
-        prev_gray_full = _to_gray_float(prev)
-        prev_processed = _maybe_resize(prev_gray_full, sensor_size)
+        prev_processed = _maybe_resize(_to_gray_float(prev), sensor_size)
 
         frame_idx = 1
         while True:
@@ -127,8 +174,7 @@ def video_to_event_stream(
             if not ok or curr is None:
                 break
 
-            curr_gray_full = _to_gray_float(curr)
-            curr_processed = _maybe_resize(curr_gray_full, sensor_size)
+            curr_processed = _maybe_resize(_to_gray_float(curr), sensor_size)
 
             pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             if pos_ms and pos_ms > 0:
@@ -136,16 +182,30 @@ def video_to_event_stream(
             else:
                 curr_t_us = frame_idx * frame_period_us
 
-            # Pass already-resized frames to avoid a second resize inside the helper.
-            events = frame_to_event_tuples(
-                prev_processed,
-                curr_processed,
-                prev_t_us=prev_t_us,
-                curr_t_us=curr_t_us,
-                c_thresh=c_thresh,
-                sensor_size=None,
-            )
-            yield events
+            if interp <= 0:
+                yield frame_to_event_tuples(
+                    prev_processed,
+                    curr_processed,
+                    prev_t_us=prev_t_us,
+                    curr_t_us=curr_t_us,
+                    c_thresh=c_thresh,
+                )
+            else:
+                sub_frames = interpolate_frames(
+                    prev_processed, curr_processed, n_intermediate=interp
+                )
+                n_sub = len(sub_frames) - 1  # number of sub-intervals
+                span = curr_t_us - prev_t_us
+                for i in range(n_sub):
+                    sub_prev_t = prev_t_us + i * span // n_sub
+                    sub_curr_t = prev_t_us + (i + 1) * span // n_sub
+                    yield frame_to_event_tuples(
+                        sub_frames[i],
+                        sub_frames[i + 1],
+                        prev_t_us=sub_prev_t,
+                        curr_t_us=sub_curr_t,
+                        c_thresh=c_thresh,
+                    )
 
             prev_processed = curr_processed
             prev_t_us = curr_t_us
