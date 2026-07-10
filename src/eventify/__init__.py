@@ -1,5 +1,6 @@
 from eventify.dvs import (
     EVENT_DTYPE,
+    frame_stream,
     frame_to_event_tuples,
     interpolate_frames,
     video_to_event_stream,
@@ -8,6 +9,7 @@ from eventify.dvs import (
 
 __all__ = [
     "EVENT_DTYPE",
+    "frame_stream",
     "frame_to_event_tuples",
     "interpolate_frames",
     "video_to_event_stream",

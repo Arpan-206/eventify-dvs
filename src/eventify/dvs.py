@@ -206,6 +206,61 @@ def video_to_event_stream(
         cap.release()
 
 
+def frame_stream(
+    source: Union[str, int],
+    sensor_size: Tuple[int, int],
+    n_bins: int,
+    window_ms: int,
+    *,
+    c_thresh: float = 0.05,
+    capture_settings: Optional[dict] = None,
+    stride_ms: Optional[int] = None,
+    dtype: type = np.float32,
+) -> Generator[np.ndarray, None, None]:
+    """Yield integrated event frames as ``(n_bins, 2, H, W)`` float32 arrays.
+
+    Each yield covers one time window of ``window_ms`` milliseconds split into
+    ``n_bins`` equal bins. Channel 0 = OFF events, channel 1 = ON events.
+    Windows are non-overlapping by default; set ``stride_ms < window_ms`` for
+    a sliding window.
+    """
+    H, W = sensor_size
+    window_us = window_ms * 1000
+    effective_stride_ms = stride_ms if stride_ms is not None else window_ms
+    stride_us = effective_stride_ms * 1000
+    bin_us = window_us // n_bins
+
+    buffer: list = []
+    t_window_start: Optional[int] = None
+
+    for chunk in video_to_event_stream(
+        source, c_thresh=c_thresh, sensor_size=sensor_size,
+        capture_settings=capture_settings,
+    ):
+        if chunk.size == 0:
+            continue
+        if t_window_start is None:
+            t_window_start = int(chunk["t"].min())
+        buffer.append(chunk)
+
+        # Keep yielding as long as the buffer covers a full window.
+        while int(buffer[-1]["t"].max()) - t_window_start >= window_us:
+            events = np.concatenate(buffer)
+            t_end = t_window_start + window_us
+            mask = (events["t"] >= t_window_start) & (events["t"] < t_end)
+            w = events[mask]
+
+            frames = np.zeros((n_bins, 2, H, W), dtype=dtype)
+            if w.size:
+                b = ((w["t"] - t_window_start) // bin_us).clip(0, n_bins - 1).astype(np.int64)
+                np.add.at(frames, (b, w["p"].astype(np.int64), w["y"], w["x"]), 1)
+            yield frames
+
+            t_window_start += stride_us
+            # Drop chunks that are entirely before the new window start.
+            buffer = [c for c in buffer if int(c["t"].max()) >= t_window_start]
+
+
 def write_hdf5(
     path: Union[str, os.PathLike],
     events: np.ndarray,
