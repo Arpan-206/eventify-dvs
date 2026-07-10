@@ -12,9 +12,12 @@ from typing import Optional, Sequence
 import cv2
 import numpy as np
 
-from eventify.core import events_to_frame, video_to_events
+from eventify._fast import build_log_lut, frame_to_crossing_counts
 from eventify.dvs import EVENT_DTYPE, video_to_event_stream, write_hdf5
-from eventify.fast import build_log_lut, frame_to_crossing_counts
+
+# DVS palette (BGR): ON = deep blue, OFF = amber.
+_ON_BGR = np.array([180, 70, 0], dtype=np.float32)
+_OFF_BGR = np.array([0, 170, 220], dtype=np.float32)
 
 
 def _parse_sensor_size(spec: str) -> tuple[int, int]:
@@ -28,7 +31,6 @@ def _parse_sensor_size(spec: str) -> tuple[int, int]:
 
 
 def _capture_settings_from_args(args: argparse.Namespace) -> Optional[dict]:
-    """Collect CAP_PROP_* overrides from --width/--height/--fps."""
     props = {}
     if getattr(args, "width", None):
         props[cv2.CAP_PROP_FRAME_WIDTH] = args.width
@@ -37,6 +39,22 @@ def _capture_settings_from_args(args: argparse.Namespace) -> Optional[dict]:
     if getattr(args, "fps", None):
         props[cv2.CAP_PROP_FPS] = args.fps
     return props or None
+
+
+def _events_to_frame(chunk: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Render a structured event array into a BGR uint8 frame."""
+    on = np.zeros((h, w), dtype=np.float32)
+    off = np.zeros((h, w), dtype=np.float32)
+    if len(chunk):
+        mask_on = chunk["p"] == 1
+        np.add.at(on, (chunk["y"][mask_on], chunk["x"][mask_on]), 1)
+        np.add.at(off, (chunk["y"][~mask_on], chunk["x"][~mask_on]), 1)
+
+    peak = max(on.max(), off.max(), 1.0)
+    intensity_on = np.clip(on / peak, 0.0, 1.0)[..., None]
+    intensity_off = np.clip(off / peak, 0.0, 1.0)[..., None]
+    img = intensity_on * _ON_BGR + intensity_off * _OFF_BGR
+    return np.clip(img, 0, 255).astype(np.uint8)
 
 
 def _convert(args: argparse.Namespace) -> int:
@@ -57,9 +75,8 @@ def _convert(args: argparse.Namespace) -> int:
 
     count = 0
     try:
-        for _, delta in video_to_events(args.input, c_thresh=args.threshold):
-            frame = events_to_frame(delta, max_delta=args.max_delta)
-            writer.write(frame)
+        for chunk in video_to_event_stream(args.input, c_thresh=args.threshold):
+            writer.write(_events_to_frame(chunk, height, width))
             count += 1
     finally:
         writer.release()
@@ -69,13 +86,7 @@ def _convert(args: argparse.Namespace) -> int:
 
 
 class _ThreadedCapture:
-    """Camera reader that always yields the latest frame, dropping stale ones.
-
-    OpenCV's cap.read() buffers internally and blocks — reading in the main
-    loop introduces a queue-shaped latency between real motion and display.
-    Reading in a background thread with a single-slot drop-newest queue means
-    the consumer always sees the freshest frame available at read time.
-    """
+    """Drops stale frames so the display loop always gets the latest."""
 
     def __init__(self, source, capture_settings: Optional[dict] = None):
         self._cap = cv2.VideoCapture(source)
@@ -96,7 +107,6 @@ class _ThreadedCapture:
             if not ok or frame is None:
                 self._stop.set()
                 break
-            # Drop the previously queued frame if the consumer hasn't taken it.
             try:
                 self._q.get_nowait()
             except queue.Empty:
@@ -110,7 +120,7 @@ class _ThreadedCapture:
         try:
             return self._q.get(timeout=timeout)
         except queue.Empty:
-            return None if self._stop.is_set() else None
+            return None
 
     def release(self) -> None:
         self._stop.set()
@@ -126,21 +136,13 @@ class _ThreadedCapture:
 
 
 def _accum_to_bgr(accum: np.ndarray, max_events: float) -> np.ndarray:
-    """Render the accumulator to BGR using the DVS palette.
-
-    Positive accumulator values (ON events) fade black → deep blue;
-    negative values (OFF events) fade black → amber/gold.
-    """
     intensity = np.clip(np.abs(accum) / max_events, 0.0, 1.0)[..., None]
     positive = accum >= 0
-    # Target color per pixel: ON = (180, 70, 0), OFF = (0, 170, 220), BGR.
     target = np.empty(accum.shape + (3,), dtype=np.float32)
-    target[..., 0] = np.where(positive, 180.0, 0.0)    # B
-    target[..., 1] = np.where(positive, 70.0, 170.0)   # G
-    target[..., 2] = np.where(positive, 0.0, 220.0)    # R
-    # Background is black; intensity=0 means the pixel stays black.
-    img = intensity * target
-    return np.clip(img, 0, 255).astype(np.uint8)
+    target[..., 0] = np.where(positive, 180.0, 0.0)
+    target[..., 1] = np.where(positive, 70.0, 170.0)
+    target[..., 2] = np.where(positive, 0.0, 220.0)
+    return np.clip(intensity * target, 0, 255).astype(np.uint8)
 
 
 def _webcam(args: argparse.Namespace) -> int:
@@ -153,7 +155,6 @@ def _webcam(args: argparse.Namespace) -> int:
     accum: Optional[np.ndarray] = None
     prev_gray: Optional[np.ndarray] = None
     last_tick = time.monotonic()
-
     frames_shown = 0
     events_seen = 0
     start = time.monotonic()
@@ -165,34 +166,28 @@ def _webcam(args: argparse.Namespace) -> int:
         while True:
             frame = cap.read(timeout=1.0)
             if frame is None:
-                # End of stream (webcam disconnected or file ended).
                 break
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # uint8
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             if prev_gray is None:
                 prev_gray = gray
                 accum = np.zeros(gray.shape, dtype=np.float32)
                 continue
 
-            on, off = frame_to_crossing_counts(
-                prev_gray, gray, c_thresh=args.threshold, log_lut=log_lut
-            )
+            on, off = frame_to_crossing_counts(prev_gray, gray, c_thresh=args.threshold, log_lut=log_lut)
 
             now = time.monotonic()
             dt = now - last_tick
             last_tick = now
             decay = 0.5 ** (dt / half_life_sec)
 
-            # In-place fade + splat: both O(n_pixels) vectorized.
             accum *= decay
             accum += on.astype(np.float32)
             accum -= off.astype(np.float32)
 
             events_seen += int(on.sum()) + int(off.sum())
-
-            img = _accum_to_bgr(accum, max_events=args.max_events)
-            cv2.imshow(window, img)
+            cv2.imshow(window, _accum_to_bgr(accum, max_events=args.max_events))
             frames_shown += 1
             prev_gray = gray
 
@@ -251,7 +246,6 @@ def build_parser() -> argparse.ArgumentParser:
     convert.add_argument("input", help="Path to the input video file.")
     convert.add_argument("output", help="Path to write the event-rendered video (e.g. out.mp4).")
     convert.add_argument("--threshold", type=float, default=0.05, help="Log-intensity event threshold (default: 0.05).")
-    convert.add_argument("--max-delta", type=float, default=None, help="Fixed saturation ceiling; omit for per-frame normalization.")
     convert.set_defaults(func=_convert)
 
     webcam = sub.add_parser("webcam", help="Show live event stream from the webcam.")
@@ -264,20 +258,11 @@ def build_parser() -> argparse.ArgumentParser:
     webcam.add_argument("--max-events", type=float, default=8.0, help="Saturation ceiling for accumulated events per pixel (default: 8).")
     webcam.set_defaults(func=_webcam)
 
-    export = sub.add_parser(
-        "export",
-        help="Export a video's events to a DVS-Gesture-compatible HDF5 file.",
-    )
+    export = sub.add_parser("export", help="Export a video's events to a DVS-Gesture-compatible HDF5 file.")
     export.add_argument("input", help="Path to the input video file.")
     export.add_argument("output", help="Path to write the events HDF5 file (e.g. out.h5).")
     export.add_argument("--threshold", type=float, default=0.05, help="Log-intensity event threshold (default: 0.05).")
-    export.add_argument(
-        "--sensor-size",
-        type=_parse_sensor_size,
-        default=None,
-        metavar="W,H",
-        help="Override sensor resolution as 'W,H' (default: source video's native resolution).",
-    )
+    export.add_argument("--sensor-size", type=_parse_sensor_size, default=None, metavar="W,H", help="Override sensor resolution as 'W,H'.")
     export.add_argument("--interp", type=int, default=0, help="Number of interpolated sub-frames between real frames (default: 0).")
     export.set_defaults(func=_export)
 

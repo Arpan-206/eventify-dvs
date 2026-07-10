@@ -75,7 +75,9 @@ def test_interpolated_frames_produce_more_events_than_direct():
     curr = np.full((16, 16), 220.0, dtype=np.float32)
 
     # Direct: one big jump.
-    direct = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.05)
+    direct = frame_to_event_tuples(
+        prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.05
+    )
 
     # Interpolated: 4 intermediates → 5 sub-intervals.
     sub_frames = interpolate_frames(prev, curr, n_intermediate=4)

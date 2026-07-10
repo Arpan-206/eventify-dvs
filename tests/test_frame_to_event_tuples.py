@@ -31,7 +31,9 @@ def test_brightening_pixel_barely_crossing_yields_one_event():
     prev = _uniform((4, 4), 99.0)  # +eps=1 → 100 in log
     curr = prev.copy()
     curr[1, 2] = 119.0  # +eps=1 → 120
-    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+    events = frame_to_event_tuples(
+        prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15
+    )
 
     assert len(events) == 1
     e = events[0]
@@ -43,7 +45,9 @@ def test_darkening_pixel_barely_crossing_yields_one_event():
     prev = _uniform((4, 4), 119.0)
     curr = prev.copy()
     curr[3, 0] = 99.0
-    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+    events = frame_to_event_tuples(
+        prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15
+    )
 
     assert len(events) == 1
     e = events[0]
@@ -135,7 +139,9 @@ def test_multi_crossing_emits_multiple_events_per_pixel():
     prev = _uniform((3, 3), 49.0)  # +eps=1 → 50
     curr = prev.copy()
     curr[1, 1] = 199.0  # +eps=1 → 200
-    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+    events = frame_to_event_tuples(
+        prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15
+    )
 
     # Exactly one pixel fired, but many crossings.
     assert len(events) == 9
@@ -148,7 +154,9 @@ def test_multi_crossing_emits_multiple_events_per_pixel():
 def test_multi_crossing_timestamps_are_distinct_and_ordered():
     prev = _uniform((1, 1), 49.0)
     curr = _uniform((1, 1), 199.0)
-    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=9000, c_thresh=0.15)
+    events = frame_to_event_tuples(
+        prev, curr, prev_t_us=0, curr_t_us=9000, c_thresh=0.15
+    )
 
     ts = events["t"]
     assert len(ts) == 9
@@ -163,7 +171,9 @@ def test_multi_crossing_darkening_emits_multiple_off_events():
     prev = _uniform((2, 2), 199.0)
     curr = prev.copy()
     curr[0, 0] = 49.0
-    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+    events = frame_to_event_tuples(
+        prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15
+    )
 
     assert len(events) == 9
     assert np.all(events["p"] == 0)
@@ -172,7 +182,9 @@ def test_multi_crossing_darkening_emits_multiple_off_events():
 def test_sub_threshold_change_still_yields_no_events():
     prev = _uniform((4, 4), 100.0)
     curr = _uniform((4, 4), 105.0)  # log(106/101) ≈ 0.048, below 0.15
-    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+    events = frame_to_event_tuples(
+        prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15
+    )
     assert len(events) == 0
 
 
@@ -191,5 +203,26 @@ def test_lower_default_produces_more_events_than_old_default():
     curr = np.clip(prev + rng.normal(0, 15, size=prev.shape), 1, 255).astype(np.float32)
 
     events_default = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000)
-    events_old = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15)
+    events_old = frame_to_event_tuples(
+        prev, curr, prev_t_us=0, curr_t_us=1000, c_thresh=0.15
+    )
     assert len(events_default) > len(events_old)
+
+
+def test_bgr_input_is_converted_to_grayscale():
+    # A BGR frame that differs from prev only in the blue channel should still fire.
+    prev = np.full((8, 8, 3), 50, dtype=np.uint8)
+    curr = np.full((8, 8, 3), 50, dtype=np.uint8)
+    curr[:, :, 0] = 200  # boost blue channel
+    events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000)
+    # Grayscale of prev ≈ 50, grayscale of curr ≈ 86 — should cross threshold.
+    assert len(events) > 0
+
+
+def test_zero_interval_events_all_at_boundary():
+    # When prev_t_us == curr_t_us every timestamp must equal that value.
+    prev = np.full((4, 4), 50.0, dtype=np.float32)
+    curr = np.full((4, 4), 200.0, dtype=np.float32)
+    events = frame_to_event_tuples(prev, curr, prev_t_us=5000, curr_t_us=5000)
+    assert len(events) > 0
+    assert np.all(events["t"] == 5000)

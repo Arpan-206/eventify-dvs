@@ -7,7 +7,7 @@ NumPy from start to finish, for use in the low-latency webcam preview.
 import numpy as np
 import pytest
 
-from eventify.fast import build_log_lut, frame_to_crossing_counts
+from eventify._fast import build_log_lut, frame_to_crossing_counts
 
 
 def test_log_lut_matches_np_log():

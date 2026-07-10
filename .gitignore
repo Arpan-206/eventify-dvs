@@ -57,5 +57,10 @@ coverage.xml
 *.h5
 *.hdf5
 *.aedat
+*.npz
+*.png
 scratch/
 tmp/
+
+# Datasets (local caches, not committed)
+dvs_gesture_data/

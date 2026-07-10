@@ -1,12 +1,4 @@
-"""DVS-Gesture-compatible event export path.
-
-Emits individual ``(x, y, t_us, polarity)`` tuples with binary polarity,
-matching the record format used by the DVS128 Gesture dataset. Kept
-strictly separate from the intensity-modulated video render path in
-``eventify.core``: rendering keeps magnitude for visualization, this
-module discards it because real DVS sensors only report threshold
-crossings.
-"""
+"""DVS-style event simulation: binary-polarity (x, y, t_us, p) tuples."""
 
 from __future__ import annotations
 
@@ -21,9 +13,7 @@ import numpy as np
 # NumPy structured dtype for a single DVS event.
 # int16 coords cover any realistic sensor; int64 for µs timestamps to
 # hold long captures without overflow. Polarity ∈ {0, 1}.
-EVENT_DTYPE = np.dtype(
-    [("x", "<i2"), ("y", "<i2"), ("t", "<i8"), ("p", "<i1")]
-)
+EVENT_DTYPE = np.dtype([("x", "<i2"), ("y", "<i2"), ("t", "<i8"), ("p", "<i1")])
 
 
 def _to_gray_float(frame: np.ndarray) -> np.ndarray:
@@ -32,7 +22,9 @@ def _to_gray_float(frame: np.ndarray) -> np.ndarray:
     return frame.astype(np.float32, copy=False)
 
 
-def _maybe_resize(frame: np.ndarray, sensor_size: Optional[Tuple[int, int]]) -> np.ndarray:
+def _maybe_resize(
+    frame: np.ndarray, sensor_size: Optional[Tuple[int, int]]
+) -> np.ndarray:
     if sensor_size is None:
         return frame
     w, h = sensor_size
@@ -86,9 +78,7 @@ def frame_to_event_tuples(
             f"Frame shape mismatch: {prev_frame.shape} vs {curr_frame.shape}"
         )
     if curr_t_us < prev_t_us:
-        raise ValueError(
-            f"curr_t_us ({curr_t_us}) must be >= prev_t_us ({prev_t_us})"
-        )
+        raise ValueError(f"curr_t_us ({curr_t_us}) must be >= prev_t_us ({prev_t_us})")
 
     prev = _maybe_resize(_to_gray_float(prev_frame), sensor_size)
     curr = _maybe_resize(_to_gray_float(curr_frame), sensor_size)
@@ -122,9 +112,9 @@ def frame_to_event_tuples(
     # a running cumsum minus the offset per block yields 1..K per pixel.
     interval = curr_t_us - prev_t_us
     starts = np.concatenate([[0], np.cumsum(counts[:-1])])
-    within_pixel_idx = (
-        np.arange(total_events) - np.repeat(starts, counts) + 1
-    ).astype(np.float64)
+    within_pixel_idx = (np.arange(total_events) - np.repeat(starts, counts) + 1).astype(
+        np.float64
+    )
     within_pixel_denom = np.repeat(counts + 1, counts).astype(np.float64)
     alphas = within_pixel_idx / within_pixel_denom
     events["t"] = (prev_t_us + alphas * interval).astype(np.int64)
@@ -158,7 +148,9 @@ def video_to_event_stream(
             cap.set(prop, value)
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-    frame_period_us = int(1_000_000 / fps) if fps > 0 else 33_333  # ~30 FPS webcam fallback
+    frame_period_us = (
+        int(1_000_000 / fps) if fps > 0 else 33_333
+    )  # ~30 FPS webcam fallback
 
     try:
         ok, prev = cap.read()

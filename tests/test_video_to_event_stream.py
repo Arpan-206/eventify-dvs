@@ -54,9 +54,7 @@ def test_timestamps_are_microseconds(synthetic_video):
 
 
 def test_sensor_size_override_reshapes_events(synthetic_video):
-    chunks = list(
-        video_to_event_stream(str(synthetic_video), sensor_size=(16, 16))
-    )
+    chunks = list(video_to_event_stream(str(synthetic_video), sensor_size=(16, 16)))
     all_events = np.concatenate(chunks)
     assert np.all(all_events["x"] < 16)
     assert np.all(all_events["y"] < 16)
@@ -81,3 +79,46 @@ def test_nonexistent_source_raises(tmp_path):
     missing = tmp_path / "does_not_exist.avi"
     with pytest.raises((IOError, RuntimeError, ValueError)):
         list(video_to_event_stream(str(missing)))
+
+
+@pytest.fixture
+def static_video(tmp_path):
+    """5-frame 32x32 video where every frame is identical."""
+    path = tmp_path / "static.avi"
+    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+    writer = cv2.VideoWriter(str(path), fourcc, 10.0, (32, 32), isColor=True)
+    assert writer.isOpened()
+    for _ in range(5):
+        writer.write(np.full((32, 32, 3), 128, dtype=np.uint8))
+    writer.release()
+    return path
+
+
+def test_identical_frames_produce_zero_events(static_video):
+    chunks = list(video_to_event_stream(str(static_video)))
+    total = sum(len(c) for c in chunks)
+    assert total == 0
+
+
+def test_interp_path_yields_more_chunks(synthetic_video):
+    # interp=3 means 4 sub-intervals per frame pair, so 4x as many chunks.
+    chunks_no_interp = list(video_to_event_stream(str(synthetic_video), interp=0))
+    chunks_interp = list(video_to_event_stream(str(synthetic_video), interp=3))
+    assert len(chunks_interp) == len(chunks_no_interp) * 4
+
+
+def test_interp_path_timestamps_are_monotonic(synthetic_video):
+    chunks = list(video_to_event_stream(str(synthetic_video), interp=2))
+    last_max = -1
+    for chunk in chunks:
+        if len(chunk) == 0:
+            continue
+        assert chunk["t"].min() >= last_max
+        last_max = int(chunk["t"].max())
+
+
+def test_interp_path_all_events_have_binary_polarity(synthetic_video):
+    chunks = list(video_to_event_stream(str(synthetic_video), interp=2))
+    all_events = np.concatenate(chunks)
+    assert len(all_events) > 0
+    assert set(np.unique(all_events["p"]).tolist()).issubset({0, 1})

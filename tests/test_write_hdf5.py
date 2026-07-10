@@ -73,3 +73,13 @@ def test_accepts_pathlib_path(tmp_path):
     path = Path(tmp_path) / "events.h5"
     write_hdf5(path, _make_events(3), sensor_shape=(64, 64))
     assert path.exists()
+
+
+def test_dataset_dtypes_match_spec(tmp_path):
+    path = tmp_path / "events.h5"
+    write_hdf5(str(path), _make_events(10), sensor_shape=(128, 128))
+    with h5py.File(str(path), "r") as f:
+        assert f["events/xs"].dtype == np.dtype("<i2")
+        assert f["events/ys"].dtype == np.dtype("<i2")
+        assert f["events/ts"].dtype == np.dtype("<i8")
+        assert f["events/ps"].dtype == np.dtype("i1")
