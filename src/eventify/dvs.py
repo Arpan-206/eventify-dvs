@@ -79,6 +79,11 @@ def frame_to_event_tuples(
         )
     if curr_t_us < prev_t_us:
         raise ValueError(f"curr_t_us ({curr_t_us}) must be >= prev_t_us ({prev_t_us})")
+    if c_thresh <= 0:
+        raise ValueError(f"c_thresh must be > 0, got {c_thresh}")
+    if eps <= 0:
+        # eps=0 sends log(0) to -inf, which turns into garbage event counts.
+        raise ValueError(f"eps must be > 0, got {eps}")
 
     prev = _maybe_resize(_to_gray_float(prev_frame), sensor_size)
     curr = _maybe_resize(_to_gray_float(curr_frame), sensor_size)
@@ -219,12 +224,13 @@ def frame_stream(
 ) -> Generator[np.ndarray, None, None]:
     """Yield integrated event frames as ``(n_bins, 2, H, W)`` float32 arrays.
 
-    Each yield covers one time window of ``window_ms`` milliseconds split into
+    ``sensor_size`` is ``(W, H)``, matching the rest of the library. Each
+    yield covers one time window of ``window_ms`` milliseconds split into
     ``n_bins`` equal bins. Channel 0 = OFF events, channel 1 = ON events.
     Windows are non-overlapping by default; set ``stride_ms < window_ms`` for
     a sliding window.
     """
-    H, W = sensor_size
+    W, H = sensor_size
     window_us = window_ms * 1000
     effective_stride_ms = stride_ms if stride_ms is not None else window_ms
     stride_us = effective_stride_ms * 1000

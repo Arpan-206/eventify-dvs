@@ -9,6 +9,9 @@ import numpy as np
 
 def build_log_lut(eps: float = 1.0) -> np.ndarray:
     """Precompute ``log(x + eps)`` for x = 0..255 as a float32 array."""
+    if eps <= 0:
+        # eps=0 sends log(0) to -inf, which turns into garbage crossing counts.
+        raise ValueError(f"eps must be > 0, got {eps}")
     x = np.arange(256, dtype=np.float32)
     return np.log(x + np.float32(eps))
 
@@ -29,6 +32,8 @@ def frame_to_crossing_counts(
         raise ValueError(
             f"Frame shape mismatch: {prev_frame.shape} vs {curr_frame.shape}"
         )
+    if c_thresh <= 0:
+        raise ValueError(f"c_thresh must be > 0, got {c_thresh}")
 
     if log_lut is None:
         log_lut = build_log_lut(eps=1.0)
