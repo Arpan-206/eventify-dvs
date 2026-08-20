@@ -81,6 +81,7 @@ import numpy as np
 from eventify import (
     frame_to_event_tuples,
     video_to_event_stream,
+    frame_stream,
     interpolate_frames,
     write_hdf5,
     EVENT_DTYPE,
@@ -94,6 +95,10 @@ events = frame_to_event_tuples(prev, curr, prev_t_us=0, curr_t_us=1000)
 chunks = list(video_to_event_stream("video.mp4", sensor_size=(128, 128), interp=4))
 all_events = np.concatenate(chunks)
 write_hdf5("out.h5", all_events, sensor_shape=(128, 128))
+
+# Binned event tensors for SNN inference
+for frames in frame_stream("video.mp4", sensor_size=(128, 128), n_bins=5, window_ms=50):
+    ...  # frames: (5, 2, 128, 128) — channel 0 = OFF, channel 1 = ON
 ```
 
 ## API reference
@@ -107,6 +112,12 @@ write_hdf5("out.h5", all_events, sensor_shape=(128, 128))
 - **`video_to_event_stream(source, c_thresh=0.05, sensor_size=None, interp=0, capture_settings=None)`** —
   generator yielding one structured event array per (sub-)frame-pair.
   Timestamps are monotonic microseconds.
+
+- **`frame_stream(source, sensor_size, n_bins, window_ms, c_thresh=0.05, capture_settings=None, stride_ms=None, dtype=np.float32)`** —
+  generator yielding `(n_bins, 2, H, W)` tensors of per-bin event counts
+  (channel 0 = OFF, channel 1 = ON). `sensor_size` is `(W, H)`, like
+  everywhere else in the library. Windows are non-overlapping unless
+  `stride_ms < window_ms`.
 
 - **`interpolate_frames(prev, curr, n_intermediate)`** —
   linearly interpolates `n_intermediate` frames between two endpoints,
