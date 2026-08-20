@@ -1,6 +1,6 @@
 [project]
 name = "eventify-dvs"
-version = "0.1.3"
+version = "0.2.0"
 description = "Convert video files or webcam feeds into simulated event-camera (DVS) data."
 readme = "README.md"
 license = { text = "MIT" }

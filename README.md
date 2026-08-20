@@ -109,9 +109,12 @@ for frames in frame_stream("video.mp4", sensor_size=(128, 128), n_bins=5, window
   A pixel whose log-delta spans `K` thresholds emits `K` events, uniformly
   staggered across the interval.
 
-- **`video_to_event_stream(source, c_thresh=0.05, sensor_size=None, interp=0, capture_settings=None)`** —
+- **`video_to_event_stream(source, c_thresh=0.05, sensor_size=None, interp=0, capture_settings=None, duration_s=None, warmup_frames=0)`** —
   generator yielding one structured event array per (sub-)frame-pair.
-  Timestamps are monotonic microseconds.
+  Timestamps are monotonic microseconds: container timestamps for file
+  sources, wall-clock for live (integer) sources. `duration_s` stops the
+  stream once timestamps reach it; `warmup_frames` discards initial frames
+  so a webcam's auto-exposure can settle.
 
 - **`frame_stream(source, sensor_size, n_bins, window_ms, c_thresh=0.05, capture_settings=None, stride_ms=None, dtype=np.float32)`** —
   generator yielding `(n_bins, 2, H, W)` tensors of per-bin event counts

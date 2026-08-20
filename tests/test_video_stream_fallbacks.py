@@ -63,15 +63,53 @@ def fake_capture(monkeypatch):
 
 
 def test_missing_fps_falls_back_to_30fps_period(fake_capture):
-    chunks = list(video_to_event_stream(0))
+    # File source with no FPS/POS_MSEC metadata: fixed 33.3 ms spacing.
+    chunks = list(video_to_event_stream("fake.avi"))
 
     assert len(chunks) == 4  # N-1 chunks for N=5 frames
     for i, chunk in enumerate(chunks):
         assert len(chunk) > 0
-        # POS_MSEC is also absent, so timestamps come from frame_idx * period.
         lo, hi = i * 33_333, (i + 1) * 33_333
         assert np.all(chunk["t"] >= lo)
         assert np.all(chunk["t"] < hi)
+
+
+def test_live_source_uses_wall_clock(fake_capture, monkeypatch):
+    # A fake clock that advances 100 ms per call: t0 lands at 0.1, the four
+    # frame pairs at 0.2..0.5, so chunks span 100 ms each, not 33.3 ms.
+    ticks = iter(x * 0.1 for x in range(1, 100))
+    monkeypatch.setattr(dvs_mod.time, "monotonic", lambda: next(ticks))
+
+    chunks = list(video_to_event_stream(0))
+
+    assert len(chunks) == 4
+    assert chunks[0]["t"].max() < 100_000
+    assert np.all(chunks[1]["t"] >= 100_000)
+    assert chunks[-1]["t"].max() < 400_000
+
+
+def test_warmup_frames_are_discarded(fake_capture):
+    # 5 frames, 2 burned on warmup: one reference frame + 2 pairs remain.
+    chunks = list(video_to_event_stream("fake.avi", warmup_frames=2))
+    assert len(chunks) == 2
+
+
+def test_duration_limits_a_file_stream(fake_capture):
+    # Fallback timestamps run at 33.3 ms per pair; a 40 ms budget covers the
+    # first pair fully and stops after the second crosses the limit.
+    chunks = list(video_to_event_stream("fake.avi", duration_s=0.04))
+    assert len(chunks) == 2
+    assert fake_capture[0].released
+
+
+def test_duration_stops_a_live_capture(fake_capture, monkeypatch):
+    ticks = iter(x * 0.1 for x in range(1, 100))
+    monkeypatch.setattr(dvs_mod.time, "monotonic", lambda: next(ticks))
+
+    # Pairs land at 100/200/300 ms; a 250 ms budget stops after the third.
+    chunks = list(video_to_event_stream(0, duration_s=0.25))
+    assert len(chunks) == 3
+    assert fake_capture[0].released
 
 
 def test_capture_settings_are_forwarded(fake_capture):

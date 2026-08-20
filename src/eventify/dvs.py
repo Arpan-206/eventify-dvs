@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Generator, Optional, Tuple, Union
 
@@ -133,15 +134,24 @@ def video_to_event_stream(
     sensor_size: Optional[Tuple[int, int]] = None,
     interp: int = 0,
     capture_settings: Optional[dict] = None,
+    duration_s: Optional[float] = None,
+    warmup_frames: int = 0,
 ) -> Generator[np.ndarray, None, None]:
     """Yield per-frame-pair structured event arrays from a video or webcam.
 
-    ``source`` is a file path or an integer webcam device index. When
-    ``interp > 0``, that many sub-frames are linearly interpolated between
-    each real frame pair and event generation runs on every sub-interval,
-    yielding one chunk per sub-interval. ``capture_settings`` is an optional
-    dict of OpenCV ``CAP_PROP_*`` overrides (e.g. width/height/fps) applied
-    right after the capture opens.
+    ``source`` is a file path or an integer webcam device index. File
+    sources are stamped with the container's own timestamps; live (integer)
+    sources are stamped with wall-clock time, so the event timeline stays
+    correct even when the camera does not deliver its nominal frame rate.
+    ``duration_s`` stops the stream after the first frame pair whose
+    timestamp reaches it (a live capture records for that many seconds).
+    ``warmup_frames`` reads and discards that many frames first, giving a
+    webcam's auto-exposure time to settle. When ``interp > 0``, that many
+    sub-frames are linearly interpolated between each real frame pair and
+    event generation runs on every sub-interval, yielding one chunk per
+    sub-interval. ``capture_settings`` is an optional dict of OpenCV
+    ``CAP_PROP_*`` overrides (e.g. width/height/fps) applied right after
+    the capture opens.
     """
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
@@ -155,13 +165,19 @@ def video_to_event_stream(
     fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
     frame_period_us = (
         int(1_000_000 / fps) if fps > 0 else 33_333
-    )  # ~30 FPS webcam fallback
+    )  # ~30 FPS fallback for files with no metadata
+    is_live = isinstance(source, int)
+    duration_us = None if duration_s is None else int(duration_s * 1_000_000)
 
     try:
+        for _ in range(warmup_frames):
+            cap.read()
+
         ok, prev = cap.read()
         if not ok or prev is None:
             return
         prev_t_us = 0
+        t0 = time.monotonic()
 
         prev_processed = _maybe_resize(_to_gray_float(prev), sensor_size)
 
@@ -173,11 +189,14 @@ def video_to_event_stream(
 
             curr_processed = _maybe_resize(_to_gray_float(curr), sensor_size)
 
-            pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
-            if pos_ms and pos_ms > 0:
-                curr_t_us = int(pos_ms * 1000)
+            if is_live:
+                curr_t_us = int((time.monotonic() - t0) * 1_000_000)
             else:
-                curr_t_us = frame_idx * frame_period_us
+                pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                if pos_ms and pos_ms > 0:
+                    curr_t_us = int(pos_ms * 1000)
+                else:
+                    curr_t_us = frame_idx * frame_period_us
 
             if interp <= 0:
                 yield frame_to_event_tuples(
@@ -207,6 +226,9 @@ def video_to_event_stream(
             prev_processed = curr_processed
             prev_t_us = curr_t_us
             frame_idx += 1
+
+            if duration_us is not None and curr_t_us >= duration_us:
+                break
     finally:
         cap.release()
 
