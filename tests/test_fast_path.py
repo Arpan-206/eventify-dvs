@@ -98,3 +98,22 @@ def test_rejects_non_uint8():
     curr = np.full((4, 4), 200, dtype=np.float32)
     with pytest.raises((TypeError, ValueError)):
         frame_to_crossing_counts(prev, curr, c_thresh=0.15)
+
+
+def test_rejects_mismatched_shapes():
+    prev = np.full((4, 4), 50, dtype=np.uint8)
+    curr = np.full((8, 8), 200, dtype=np.uint8)
+    with pytest.raises(ValueError):
+        frame_to_crossing_counts(prev, curr, c_thresh=0.15)
+
+
+def test_build_log_lut_rejects_nonpositive_eps():
+    with pytest.raises(ValueError):
+        build_log_lut(eps=0.0)
+
+
+def test_rejects_nonpositive_c_thresh():
+    prev = np.full((4, 4), 50, dtype=np.uint8)
+    curr = np.full((4, 4), 200, dtype=np.uint8)
+    with pytest.raises(ValueError):
+        frame_to_crossing_counts(prev, curr, c_thresh=0.0)
